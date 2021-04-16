@@ -33,7 +33,11 @@ load("@local_config_tensorrt//:build_defs.bzl", "if_tensorrt")
 
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    features = [
+        "-layering_check",
+        "-parse_headers",
+    ],
+    licenses = ["notice"],
 )
 
 cc_library(

@@ -70,6 +70,9 @@ option(TFLITE_ENABLE_GPU "Enable GPU" OFF)
 # This is currently not supported.
 option(TFLITE_ENABLE_FLEX "Enable SELECT_TF_OPS" OFF) # TODO: Add support
 option(TFLITE_ENABLE_XNNPACK "Enable XNNPACK backend" ON)
+
+option(TFLITE_KERNEL_TEST "Enable tflite kernel unit test" OFF)
+
 set(CMAKE_CXX_STANDARD 14)  # Some components require C++14.
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(_TFLITE_ENABLE_NNAPI "${TFLITE_ENABLE_NNAPI}")
@@ -420,11 +423,22 @@ target_link_libraries(tensorflow-lite
     ruy
     ${TFLITE_TARGET_DEPENDENCIES}
 )
+
+if (NOT BUILD_SHARED_LIBS)
+  list(APPEND TFLITE_TARGET_PUBLIC_OPTIONS "-DTFL_STATIC_LIBRARY_BUILD")
+endif()
+
 target_compile_options(tensorflow-lite
   PUBLIC ${TFLITE_TARGET_PUBLIC_OPTIONS}
   PRIVATE ${TFLITE_TARGET_PRIVATE_OPTIONS}
 )
 add_library(tensorflow::tensorflowlite ALIAS tensorflow-lite)
+
+# The kernel tests.
+if(TFLITE_KERNEL_TEST)
+  enable_testing()
+  add_subdirectory(${TFLITE_SOURCE_DIR}/kernels)
+endif()
 
 # The benchmark tool.
 add_subdirectory(${TFLITE_SOURCE_DIR}/tools/benchmark)

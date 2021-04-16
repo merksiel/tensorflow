@@ -40,6 +40,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
+#include "tensorflow/compiler/xla/service/all_gather_combiner.h"
 #include "tensorflow/compiler/xla/service/all_gather_decomposer.h"
 #include "tensorflow/compiler/xla/service/all_reduce_combiner.h"
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
@@ -112,6 +113,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/qr_expander.h"
 #include "tensorflow/compiler/xla/service/real_imag_expander.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
+#include "tensorflow/compiler/xla/service/result_caster.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/sharding_propagation.h"
@@ -170,6 +172,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<RealImagExpander>();
 
     pipeline.AddPass<OperandUpcaster>();
+    pipeline.AddPass<ResultCaster>();
 
     // Expand random number generation.
     pipeline.AddPass<RngExpander>();
@@ -356,6 +359,14 @@ Status GpuCompiler::OptimizeHloModule(
                                       /*only_fusion_computations=*/true);
     horizontal_fusion.AddPass<HloDCE>();
     TF_RETURN_IF_ERROR(horizontal_fusion.Run(hlo_module).status());
+  }
+
+  {
+    HloPassPipeline pipeline("all_gather_combiner");
+    pipeline.AddPass<AllGatherCombiner>(
+        /*combine_threshold_in_bytes=*/1024 * 1024 * 1024,
+        /*combine_threshold_count=*/256);
+    TF_RETURN_IF_ERROR(pipeline.Run(hlo_module).status());
   }
 
   {
@@ -568,7 +579,7 @@ GpuCompiler::RunHloPassesAndBufferAssignement(
           [](LogicalBuffer::Color) { return kXlaAllocatedBufferAlignBytes; },
           /*allocate_buffers_for_constants=*/true,
           /*colorer=*/BufferAssigner::DefaultColorer(),
-          /*must_not_live_out=*/{}, DummyCanShareBufferFunction));
+          /*must_not_live_out=*/{}, GetCanShareBuffer()));
 
   return std::make_tuple(std::move(hlo_module), std::move(assignment));
 }

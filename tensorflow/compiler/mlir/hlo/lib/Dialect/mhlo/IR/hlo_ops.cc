@@ -146,6 +146,46 @@ static void ReplaceOpWithRegion(PatternRewriter& rewriter, Operation* op,
 }
 
 #include "mhlo_canonicalize.inc"
+
+// Common shape function helper for RngNormal and RngUniform.
+static LogicalResult rngInferReturnTypeComponents(
+    MLIRContext* context, Optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, RegionRange regions,
+    SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
+  if (operands.size() != 3)
+    return emitOptionalError(location, "expected 3 operands");
+
+  SmallVector<int64_t> shapeVector;
+  Value shapeOperand = operands[2];
+  auto shapeOperandType = shapeOperand.getType().cast<ShapedType>();
+  Type elementType = getElementTypeOrSelf(operands[1]);
+
+  // Match constant shape arguments.
+  DenseIntElementsAttr shape;
+  if (!matchPattern(shapeOperand, m_Constant(&shape))) {
+    if (!shapeOperandType.hasRank()) {
+      inferredReturnShapes.emplace_back(elementType);
+      return success();
+    }
+    if (shapeOperandType.getRank() != 1)
+      return emitOptionalError(location, "shape operand required to be 1D");
+    int size = shapeOperandType.getDimSize(0);
+    if (size == ShapedType::kDynamicSize) {
+      inferredReturnShapes.emplace_back(elementType);
+      return success();
+    }
+    shapeVector.resize(size, ShapedType::kDynamicSize);
+    inferredReturnShapes.emplace_back(shapeVector, elementType);
+    return success();
+  }
+
+  shapeVector.reserve(shape.size());
+  for (const APInt& fp : shape.getIntValues())
+    shapeVector.push_back(fp.getSExtValue());
+  inferredReturnShapes.emplace_back(shapeVector, elementType);
+  return success();
+}
+
 }  // namespace
 
 //===----------------------------------------------------------------------===//
@@ -898,6 +938,7 @@ static LogicalResult Verify(DynamicBroadcastInDimOp op) {
   return success();
 }
 
+namespace {
 // If a DynamicBroadCastInDimOp is not actually dynamic, use an ordinary
 // BroadcastInDimOp.
 class DynamicBroadcastInDimOpNotActuallyDynamic
@@ -915,9 +956,40 @@ class DynamicBroadcastInDimOpNotActuallyDynamic
   }
 };
 
+class ChainedDynamicBroadcastInDimCanonicalization
+    : public OpRewritePattern<DynamicBroadcastInDimOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(DynamicBroadcastInDimOp bcast,
+                                PatternRewriter& rewriter) const override {
+    auto preceding_bcast =
+        bcast.operand().getDefiningOp<DynamicBroadcastInDimOp>();
+    if (!preceding_bcast) return failure();
+
+    // Compose broadcast dimensions.
+    DenseIntElementsAttr preceding_bcast_dims =
+        preceding_bcast.broadcast_dimensions();
+    DenseIntElementsAttr bcast_dims = bcast.broadcast_dimensions();
+    SmallVector<APInt, 4> composition;
+    for (APInt preceding_dim : preceding_bcast_dims) {
+      auto composed_dim = bcast_dims.getValue({preceding_dim.getZExtValue()})
+                              .cast<IntegerAttr>();
+      composition.push_back(composed_dim.getValue());
+    }
+    auto composed_bcast_dims =
+        DenseIntElementsAttr::get(preceding_bcast_dims.getType(), composition);
+
+    rewriter.replaceOpWithNewOp<DynamicBroadcastInDimOp>(
+        bcast, bcast.getType(), preceding_bcast.operand(),
+        bcast.output_dimensions(), composed_bcast_dims);
+    return success();
+  }
+};
+}  // namespace
+
 void DynamicBroadcastInDimOp::getCanonicalizationPatterns(
     OwningRewritePatternList& results, MLIRContext* context) {
-  results.insert<DynamicBroadcastInDimOpNotActuallyDynamic,
+  results.insert<ChainedDynamicBroadcastInDimCanonicalization,
+                 DynamicBroadcastInDimOpNotActuallyDynamic,
                  DynamicBroadcastToOwnShape_1, DynamicBroadcastToOwnShape_2,
                  DynamicBroadcastToOwnShape_3, DynamicBroadcastToOwnShape_4>(
       context);
@@ -1729,6 +1801,38 @@ static LogicalResult Verify(RecvOp op) {
 OpFoldResult CopyOp::fold(ArrayRef<Attribute> operands) { return getOperand(); }
 
 //===----------------------------------------------------------------------===//
+// ReduceWindowOp
+//===----------------------------------------------------------------------===//
+
+// For reduce-window, all `inputs` need to have compatible shapes.
+static LogicalResult Verify(ReduceWindowOp op) {
+  if (failed(verifyCompatibleShapes(op.inputs().getTypes())))
+    return op.emitOpError() << "requires same shape for all inputs";
+  return success();
+}
+
+// Get the operation used for reduction applied to `result_index`th result. Its
+// expected to be a binary operation that consumes `result_index`th and
+// `result_index + operands().size`th arguments of the body.
+Operation* ReduceWindowOp::getReductionOp(int result_index) {
+  auto return_op = cast<ReturnOp>(body().front().getTerminator());
+  Operation* compute_op = return_op.results()[result_index].getDefiningOp();
+  if (compute_op->getNumOperands() != 2) return nullptr;
+  auto arg0 = compute_op->getOperand(0).dyn_cast<BlockArgument>();
+  auto arg1 = compute_op->getOperand(1).dyn_cast<BlockArgument>();
+  if (!arg0 || !arg1) return nullptr;
+  int arg0_num = arg0.getArgNumber();
+  int arg1_num = arg1.getArgNumber();
+  int other_arg_index = result_index + inputs().size();
+  if (arg0_num == result_index && arg1_num == other_arg_index)
+    return compute_op;
+  if (arg0_num == other_arg_index && arg1_num == result_index &&
+      compute_op->hasTrait<OpTrait::IsCommutative>())
+    return compute_op;
+  return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
 // ReverseOp
 //===----------------------------------------------------------------------===//
 
@@ -1778,28 +1882,52 @@ static TensorType GetReduceResultType(Type operand_ty,
 }
 
 void ReduceOp::build(OpBuilder& builder, OperationState& state,
-                     ValueRange operands, ValueRange init_values,
+                     ValueRange inputs, ValueRange init_values,
                      DenseIntElementsAttr dimensions) {
   SmallVector<Type, 1> result_ty;
-  result_ty.reserve(operands.size());
+  result_ty.reserve(inputs.size());
 
-  for (Value operand : operands) {
+  for (Value input : inputs) {
     result_ty.push_back(
-        GetReduceResultType(operand.getType(), dimensions, &builder));
+        GetReduceResultType(input.getType(), dimensions, &builder));
   }
-  build(builder, state, result_ty, operands, init_values, dimensions);
+  build(builder, state, result_ty, inputs, init_values, dimensions);
 }
 
 LogicalResult ReduceOp::fold(ArrayRef<Attribute> operands,
                              SmallVectorImpl<OpFoldResult>& results) {
   // No dimensions to reduce.
   if (dimensions().getNumElements() == 0) {
-    for (Value input : this->operands()) {
+    for (Value input : this->inputs()) {
       results.push_back(input);
     }
     return success();
   }
   return failure();
+}
+
+//===----------------------------------------------------------------------===//
+// RngNormalOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RngNormalOp::inferReturnTypeComponents(
+    MLIRContext* context, Optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, RegionRange regions,
+    SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
+  return rngInferReturnTypeComponents(context, location, operands, attributes,
+                                      regions, inferredReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// RngUniformOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RngUniformOp::inferReturnTypeComponents(
+    MLIRContext* context, Optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, RegionRange regions,
+    SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
+  return rngInferReturnTypeComponents(context, location, operands, attributes,
+                                      regions, inferredReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//

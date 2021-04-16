@@ -1384,7 +1384,7 @@ REGISTER_OP("SparseSegmentMeanGrad")
     .Input("segment_ids: Tsegmentids")
     .Input("output_dim0: int32")
     .Output("output: T")
-    .Attr("T: {float, double}")
+    .Attr("T: {bfloat16, float, double}")
     .Attr("Tidx: {int32, int64} = DT_INT32")
     .Attr("Tsegmentids: {int32, int64} = DT_INT32")
     .SetShapeFn(SparseSegmentReductionGradShapeFn);
@@ -1417,7 +1417,7 @@ REGISTER_OP("SparseSegmentSqrtNGrad")
     .Input("segment_ids: Tsegmentids")
     .Input("output_dim0: int32")
     .Output("output: T")
-    .Attr("T: {float, double}")
+    .Attr("T: {bfloat16, float, double}")
     .Attr("Tidx: {int32, int64} = DT_INT32")
     .Attr("Tsegmentids: {int32, int64} = DT_INT32")
     .SetShapeFn(SparseSegmentReductionGradShapeFn);
@@ -1940,32 +1940,6 @@ REGISTER_OP("Requantize")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 0, &unused));
       c->set_output(1, c->Scalar());
       c->set_output(2, c->Scalar());
-      return Status::OK();
-    });
-
-REGISTER_OP("CompareAndBitpack")
-    .Input("input: T")
-    .Input("threshold: T")
-    .Output("output: uint8")
-    .Attr("T: {bool, float16, float32, float64, int8, int16, int32, int64}")
-    .SetShapeFn([](InferenceContext* c) {
-      ShapeHandle input;
-      TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), 1, &input));
-      ShapeHandle unused;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
-      ShapeHandle output = input;
-      if (c->RankKnown(input)) {
-        int rank = c->Rank(input);
-        auto inner_dim = c->Dim(input, rank - 1);
-        DimensionHandle inferred_dim;
-        TF_RETURN_IF_ERROR(c->Divide(inner_dim, 8,
-                                     /* evenly_divisible */ true,
-                                     &inferred_dim));
-        TF_RETURN_IF_ERROR(
-            c->ReplaceDim(output, rank - 1, inferred_dim, &output));
-      }
-      c->set_output(0, output);
-
       return Status::OK();
     });
 

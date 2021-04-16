@@ -4,6 +4,13 @@
 
 ## Breaking Changes
 
+* `tf.train.experimental.enable_mixed_precision_graph_rewrite` is removed, as
+  the API only works in graph mode and is not customizable. The function is
+  still accessible under
+  `tf.compat.v1.mixed_precision.enable_mixed_precision_graph_rewrite`, but it is
+  recommended to use the
+  [Keras mixed precision API](https://www.tensorflow.org/guide/mixed_precision)
+  instead.
 *<DOCUMENT BREAKING CHANGES HERE>
 *<THIS SECTION SHOULD CONTAIN API, ABI AND BEHAVIORAL BREAKING CHANGES>
 
@@ -18,6 +25,15 @@
 *<INSERT MAJOR FEATURE HERE, USING MARKDOWN SYNTAX>
 *<IF RELEASE CONTAINS MULTIPLE FEATURES FROM SAME AREA, GROUP THEM TOGETHER>
 
+* `tf.keras`:
+    *   `tf.keras.utils.experimental.DatasetCreator` now takes an optional
+        `tf.distribute.InputOptions` for specific options when used with
+        distribution.
+
+* `tf.lite`:
+    *   The recommended Android NDK version for building TensorFlow Lite has
+        been changed from r18b to r19c.
+
 ## Bug Fixes and Other Changes
 
 *<SIMILAR TO ABOVE SECTION, BUT FOR OTHER IMPORTANT CHANGES / BUG FIXES>
@@ -26,6 +42,18 @@
 *   TF Core:
     *   Added `tf.saved_model.experimental.TrackableResource`, which allows the
         creation of custom wrapper objects for resource tensors.
+    *   Added `tf.lookup.experimental.MutableHashTable`, which provides a
+        generic mutable hash table implementation.
+        *   Compared to `tf.lookup.experimental.DenseHashTable` this offers
+        lower overall memory usage, and a cleaner API. It does not require
+        specifying a `delete_key` and `empty_key` that cannot be inserted into
+        the table.
+*   `tf.data`:
+    *   Promoting `tf.data.experimental.get_single_element` API to
+        `tf.data.Dataset.get_single_element` and deprecating the experimental
+        endpoint.
+*  `tf.lite`:
+  * Fix mean op reference quantization rounding issue.
 
 ## Thanks to our Contributors
 
@@ -158,6 +186,9 @@ This release contains contributions from many people at Google, as well as:
         the input pipeline to insert sharding transformations.
     *   Make tf.data.Options persistent across `tf.function` and `GraphDef`
         boundaries.
+    *   If autotuning is ON, `tf.data.Dataset.map()` will default to be
+        parallelized unless users turn off the optimization
+        option `map_parallelization` explicitly.
 *   XLA compilation:
     *   `tf.function(experimental_compile=True)` has become a stable API,
         renamed `tf.function(jit_compile=True)`.
